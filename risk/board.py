@@ -1,12 +1,14 @@
 import os
 import random
-from collections import namedtuple
+from collections import namedtuple, deque
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.path import Path
 
 import risk.definitions
+import heapdict
+import copy
 
 Territory = namedtuple('Territory', ['territory_id', 'player_id', 'armies'])
 Move = namedtuple('Attack', ['from_territory_id', 'from_armies', 'to_territory_id', 'to_player_id', 'to_armies'])
@@ -63,6 +65,11 @@ class Board(object):
         neighbor_ids = risk.definitions.territory_neighbors[territory_id]
         return (t for t in self.data if t.territory_id in neighbor_ids)
 
+    def neighbor_ids(self,territory_id):
+        neighbors = list(self.neighbors(territory_id))
+        neighbors = [neighbor.territory_id for neighbor in neighbors]
+        return neighbors
+
     def hostile_neighbors(self, territory_id):
         """
         Create a generator of all territories neighboring a given territory, of which
@@ -93,6 +100,16 @@ class Board(object):
         neighbor_ids = risk.definitions.territory_neighbors[territory_id]
         return (t for t in self.data if (t.player_id == player_id and t.territory_id in neighbor_ids))
 
+    def my_allies(self, my_id): 
+        allies = list(self.friendly_neighbors(my_id))
+        allies = [ally.territory_id for ally in allies]
+        return allies
+
+    def enemies(self, my_id): 
+        enemies = list(self.hostile_neighbors(my_id))
+        enemies = [enemy.territory_id for enemy in enemies]
+        return enemies
+
     
     # ================== #
     # == Path Methods == #
@@ -111,7 +128,22 @@ class Board(object):
         Returns:
             bool: True if the input path is valid
         '''
+        if len(set(path)) != len(path):
+            return False
 
+
+        def go(path): 
+            if len(path) <= 1: 
+                return True
+
+            neighbors = self.neighbor_ids(path[0])
+            
+            if path[1] not in neighbors: 
+                return False 
+
+            return go(path[1:])
+
+        return go(path)
     
     def is_valid_attack_path(self, path):
         '''
@@ -130,7 +162,24 @@ class Board(object):
         Returns:
             bool: True if the path is an attack path
         '''
+        if not self.is_valid_path(path):
+            return False
 
+        if len(path) < 2:
+            return False
+
+        my_id = self.owner(path[0])
+
+        def go(path):
+            if len(path) < 1: 
+                return True 
+            
+            if self.owner(path[0]) == my_id:
+                return False
+
+            return go(path[1:])
+
+        return go(path[1:])
 
     def cost_of_attack_path(self, path):
         '''
@@ -143,7 +192,20 @@ class Board(object):
         Returns:
             bool: the number of enemy armies in the path
         '''
+        if not self.is_valid_attack_path:
+            raise ValueError ("cannot calculate invalid path") 
+        
+        armies = 0 
+       
+        print("path=", path)
+        for enemy_terr_id in path[1:]: 
+            for t in self.data:
+                if t.territory_id == enemy_terr_id: 
+                    print ("territory =", t)
+                    armies += t.armies
 
+        return armies
+        
 
     def shortest_path(self, source, target):
         '''
@@ -161,7 +223,37 @@ class Board(object):
         Returns:
             [int]: a valid path between source and target that has minimum length; this path is guaranteed to exist
         '''
+        path = [source] 
+        
+        if source == target: 
+            return path
 
+        poss_paths = deque()
+        poss_paths.append(path)
+
+        #i = 0 
+        while len(poss_paths) >0:
+            #i += 1 
+            #print ("\n")
+            #print ("i =", i)
+            curr = poss_paths.popleft()
+            #print ("current popped left =", curr) 
+            #print("neighbors of last=", self.neighbor_ids(curr[-1]))
+            for neighbor in self.neighbor_ids(curr[-1]):
+                if neighbor in curr: 
+                    #print ("already visited", neighbor)
+                    continue
+                #print("neighbor=", neighbor)
+                if neighbor == target: 
+                    curr.append(neighbor) 
+                    #print ("finished")
+                    #print("curr=", curr)
+                    return curr
+                poss_path = curr[:]
+                poss_path.append(neighbor) 
+                #print ("appended", neighbor)
+                poss_paths.append(poss_path) 
+                #print ("all paths =", poss_paths)
 
     def can_fortify(self, source, target):
         '''
@@ -177,6 +269,29 @@ class Board(object):
             bool: True if reinforcing the target from the source territory is a valid move
         '''
 
+        if source == target: 
+            return False
+
+        if source in self.neighbor_ids(target):
+            print ("territory next to target")
+            return False 
+
+        path = [source] 
+        poss_paths = deque()
+        poss_paths.append(path)
+
+        while len(poss_paths) > 0:
+            curr = poss_paths.popleft()
+            for neighbor in self.neighbor_ids(curr[-1]): 
+                if neighbor == target:
+                    return True
+                if neighbor in self.my_allies(curr[-1]):
+                    if neighbor not in curr:
+                        poss_path = curr[:]
+                        poss_path.append(neighbor)
+                        poss_paths.append(poss_path)
+        
+        return False
 
     def cheapest_attack_path(self, source, target):
         '''
@@ -191,7 +306,36 @@ class Board(object):
         Returns:
             [int]: a list of territory_ids representing the valid attack path; if no path exists, then it returns None instead
         '''
-
+        if self.owner(source) == self.owner(target):
+            return None
+        territories = set()
+        territories.add(source)
+        my_dict = dict()
+        my_dict[source] = [source]
+        que = heapdict.heapdict()
+        que[source] = 0
+        while que:
+            current, armies = que.peekitem()
+            que.pop(current)
+            if target == current:
+                return my_dict[current]
+            for neighbor in list(risk.definitions.territory_neighbors[current]):
+                if self.owner(source) == self.owner(neighbor):
+                    pass
+                elif neighbor in territories:
+                    pass
+                else:
+                    another = copy.deepcopy(my_dict[current])
+                    another.append(neighbor)
+                    path = armies + self.armies(neighbor)
+                    if neighbor not in que:
+                        my_dict[neighbor] = another
+                        que[neighbor] = path
+                    elif que[neighbor] > path:
+                        my_dict[neighbor] = another
+                        que[neighbor] = path
+            territories.add(current)
+        return None
 
     def can_attack(self, source, target):
         '''
@@ -202,6 +346,10 @@ class Board(object):
         Returns:
             bool: True if a valid attack path exists between source and target; else False
         '''
+        path = self.cheapest_attack_path(source, target)
+        if path is None:
+            return False
+        return self.is_valid_attack_path(path)
 
 
     # ======================= #
@@ -405,7 +553,7 @@ class Board(object):
         """
         im = plt.imread(os.getcwd() + '/img/risk.png')
         dpi=96
-        img_width=800
+        img_width=1000
         fig, ax = plt.subplots(figsize=(img_width/dpi, 300/dpi), dpi=dpi)
         _ = plt.imshow(im)
         plt.axis('off')
